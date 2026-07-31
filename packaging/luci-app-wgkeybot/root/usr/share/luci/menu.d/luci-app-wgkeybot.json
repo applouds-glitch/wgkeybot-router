@@ -1,0 +1,13 @@
+{
+	"admin/services/wgkeybot": {
+		"title": "WgKeyBot",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "wgkeybot/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-wgkeybot" ]
+		}
+	}
+}

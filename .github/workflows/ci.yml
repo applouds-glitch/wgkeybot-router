@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Мосты keen/ и owrt/ не тегированы — тегируются только два файла-селектора
+      # в platform/. Поэтому проход без тегов проверяет типы обеих платформ, а
+      # второй проход нужен лишь чтобы покрыть сам селектор.
+      - name: go vet (openwrt)
+        run: GOOS=linux go vet ./...
+
+      - name: go vet (keenetic)
+        run: GOOS=linux go vet -tags keenetic ./...
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          [ -z "$out" ] || { echo "не отформатировано:"; echo "$out"; exit 1; }
+
+      # Все целевые арки под обеими метками. 32-битные mips держим build-only
+      # именно ради ловли переполнений int — они уже ловились здесь раньше.
+      - name: Cross-compile all router arches
+        run: |
+          set -e
+          for tag in "" "keenetic"; do
+            for spec in "arm64:" "arm:GOARM=7" "mipsle:GOMIPS=softfloat" "mips:GOMIPS=softfloat" "amd64:"; do
+              arch="${spec%%:*}"; extra="${spec#*:}"
+              echo "== ${tag:-openwrt} / $arch"
+              env GOOS=linux GOARCH="$arch" CGO_ENABLED=0 $extra \
+                go build ${tag:+-tags $tag} -trimpath -ldflags="-s -w" -o /dev/null .
+            done
+          done
+
+      # Метки должны выбрасывать неиспользуемый мост целиком: иначе на роутере
+      # с ограниченной флеш-памятью в бинарь приезжает вторая платформа со
+      # своими зависимостями (netlink), и смысл раздельных сборок теряется.
+      - name: Build tags must drop the unused bridge
+        run: |
+          set -e
+          go build -o /tmp/wgkb-owrt .
+          go build -tags keenetic -o /tmp/wgkb-keen .
+
+          check() { # $1 бинарь, $2 шаблон символа, $3 want-zero|want-nonzero
+            n=$(go tool nm "$1" | grep -c "$2" || true)
+            case "$3" in
+              want-zero)    [ "$n" -eq 0 ] || { echo "FAIL: $1 содержит $n символов $2"; exit 1; } ;;
+              want-nonzero) [ "$n" -gt 0 ] || { echo "FAIL: $1 не содержит символов $2"; exit 1; } ;;
+            esac
+            echo "ok: $1 / $2 = $n"
+          }
+
+          check /tmp/wgkb-keen 'vishvananda'   want-zero      # netlink не нужен Keenetic
+          check /tmp/wgkb-keen 'router/owrt\.' want-zero
+          check /tmp/wgkb-keen 'router/keen\.' want-nonzero
+          check /tmp/wgkb-owrt 'router/keen\.' want-zero      # RCI не нужен OpenWrt
+          check /tmp/wgkb-owrt 'router/owrt\.' want-nonzero
+
+      - name: Shell syntax
+        run: sh -n install.sh

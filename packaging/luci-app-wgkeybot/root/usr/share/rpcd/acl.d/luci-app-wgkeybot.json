@@ -1,0 +1,19 @@
+{
+	"luci-app-wgkeybot": {
+		"description": "Grant access to WgKeyBot configuration and control",
+		"read": {
+			"uci": [ "wgkeybot" ],
+			"file": {
+				"/usr/bin/wgkeybot status-json": [ "exec" ],
+				"/usr/bin/wgkeybot captcha": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "wgkeybot" ],
+			"file": {
+				"/usr/bin/wgkeybot reload": [ "exec" ],
+				"/usr/bin/wgkeybot import *": [ "exec" ]
+			}
+		}
+	}
+}

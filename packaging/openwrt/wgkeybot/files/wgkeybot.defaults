@@ -1,0 +1,38 @@
+#!/bin/sh
+# uci-defaults: создаёт fw4-зону для TUN-интерфейса wgkeybot (NAT/masquerade)
+# и forwarding из LAN. Выполняется один раз при установке пакета.
+
+. /lib/functions.sh
+
+IFNAME="$(uci -q get wgkeybot.main.ifname)"; [ -n "$IFNAME" ] || IFNAME="wgkb0"
+LAN="$(uci -q get wgkeybot.main.lan)"; [ -n "$LAN" ] || LAN="lan"
+
+# Зона уже есть?
+zone_exists=0
+check_zone() {
+	local name
+	config_get name "$1" name
+	[ "$name" = "wgkeybot" ] && zone_exists=1
+}
+config_load firewall
+config_foreach check_zone zone
+
+if [ "$zone_exists" = "0" ]; then
+	z="$(uci add firewall zone)"
+	uci set firewall.$z.name='wgkeybot'
+	uci set firewall.$z.input='REJECT'
+	uci set firewall.$z.output='ACCEPT'
+	uci set firewall.$z.forward='REJECT'
+	uci set firewall.$z.masq='1'
+	uci set firewall.$z.mtu_fix='1'
+	uci add_list firewall.$z.device="$IFNAME"
+
+	f="$(uci add firewall forwarding)"
+	uci set firewall.$f.src="$LAN"
+	uci set firewall.$f.dest='wgkeybot'
+
+	uci commit firewall
+	[ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload >/dev/null 2>&1
+fi
+
+exit 0

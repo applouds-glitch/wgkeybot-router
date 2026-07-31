@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Статические бинарники для install.sh ────────────────────────────────────
+  #
+  # Две матрицы в одной: сборка по умолчанию даёт OpenWrt-бинарь
+  # wgkeybot-<goarch>, `-tags keenetic` — wgkeybot-keenetic-<asset>. Имена
+  # ассетов сохранены от прежних раздельных репозиториев, чтобы уже
+  # разошедшиеся install.sh продолжали находить файлы.
+  binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # OpenWrt (сборка по умолчанию)
+          - asset: wgkeybot-amd64
+            goarch: amd64
+          - asset: wgkeybot-arm64
+            goarch: arm64
+          - asset: wgkeybot-armv7
+            goarch: arm
+            goarm: "7"
+          - asset: wgkeybot-mipsle
+            goarch: mipsle
+            gomips: softfloat
+          - asset: wgkeybot-mips
+            goarch: mips
+            gomips: softfloat
+          # Keenetic (-tags keenetic). Арки строго по моделям 4.x: MT7621
+          # (mipsle) и MT7622/EN7581 (arm64). x86_64 здесь не собираем —
+          # Keenetic на x86 не существует, такой ассет никому не нужен.
+          - asset: wgkeybot-keenetic-mipselsf
+            goarch: mipsle
+            gomips: softfloat
+            tags: keenetic
+          - asset: wgkeybot-keenetic-aarch64
+            goarch: arm64
+            tags: keenetic
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Derive version
+        id: ver
+        run: |
+          REF="${GITHUB_REF_NAME}"
+          V="${REF#v}"
+          printf '%s' "$V" | grep -qE '^[0-9]' || V="0.0.0-${GITHUB_SHA::7}"
+          echo "v=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath ${{ matrix.tags && format('-tags {0}', matrix.tags) || '' }} \
+            -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.v }}" \
+            -o "${{ matrix.asset }}" .
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact (non-tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  # ── .ipk через OpenWrt SDK для ходовых таргетов ─────────────────────────────
+  # Только OpenWrt: на Keenetic ipk не собираем, там ставится install.sh.
+  ipk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64_cortex-a53   # filogic / mt7622 / bcm27xx
+          - mipsel_24kc          # ramips/mt7621 (большинство роутеров)
+          - x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync PKG_VERSION with tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$V/" packaging/openwrt/wgkeybot/Makefile
+
+      # Копировать пакет в корень не надо: gh-action-sdk отдаёт весь репозиторий
+      # как feed, а scripts/feeds ищет Makefile'ы рекурсивно — так же, как это
+      # работало в прежнем openwrt-репозитории с пакетом в openwrt/wgkeybot/.
+      # Staging-копия создала бы второй Makefile того же PKG_NAME в одном feed.
+      # V=s — иначе при ошибке SDK печатает только «failed to build» без единой
+      # строки от компилятора, и падение приходится угадывать.
+      - name: Build ipk
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}
+          FEEDNAME: wgkeybot
+          PACKAGES: wgkeybot
+          V: s
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgkeybot-buildlogs-${{ matrix.arch }}
+          path: logs/
+          if-no-files-found: ignore
+
+      - name: Collect ipk
+        run: |
+          mkdir -p out
+          find bin -name 'wgkeybot*.ipk' -o -name 'wgkeybot*.apk' | xargs -I{} cp {} out/ || true
+          ls -la out
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact (non-tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgkeybot-ipk-${{ matrix.arch }}
+          path: out/*
+
+  # ── install.sh в ассеты релиза ──────────────────────────────────────────────
+  installer:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: install.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

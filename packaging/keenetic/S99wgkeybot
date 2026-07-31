@@ -1,0 +1,14 @@
+#!/bin/sh
+# wgkeybot — WireGuard/TURN VPN client for Keenetic.
+# Стандартный init-скрипт Entware (/opt/etc/init.d/rc.func).
+# Демон сам супервизирует реконнекты; при падении процесса его перезапустит
+# ndm-хук 50-wgkeybot.sh (check+start) при ближайшем сетевом событии.
+
+ENABLED=yes
+PROCS=wgkeybot
+ARGS="run"
+PREARGS=""
+DESC="WgKeyBot VPN daemon"
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+. /opt/etc/init.d/rc.func
