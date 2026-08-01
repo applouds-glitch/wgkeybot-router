@@ -32,7 +32,7 @@
 | | OpenWrt | Keenetic |
 |---|---|---|
 | WireGuard | userspace wireguard-go (без kmod) | встроенный ядерный клиент прошивки |
-| Настройка туннеля | UAPI + netlink | RCI `http://localhost:79/rci` (parse-команды) |
+| Настройка туннеля | UAPI + netlink | RCI `http://127.0.0.1:79/rci` (parse-команды) |
 | Анти-петля | `SO_MARK` + `ip rule fwmark N lookup main` | host-маршруты `/32` через WAN |
 | Настройки | UCI `/etc/config/wgkeybot` | плоский `/opt/etc/wgkeybot/wgkeybot.conf` |
 | Сервис | procd | Entware `rc.func` + ndm-хук |
@@ -86,7 +86,7 @@ owrt/                мост OpenWrt
   platform.go        core.Platform: пути /etc, UCI
   backend.go         core.Backend: wireguard-go + netlink + nft
 platform/            селектор моста по build-тегам (два файла, см. ниже)
-packaging/           keenetic/ (Entware), openwrt/wgkeybot/ (ipk), luci-app-wgkeybot/
+packaging/           keenetic/ (Entware), openwrt/wgkeybot/ (apk), luci-app-wgkeybot/
 install.sh           единый установщик: детект платформы → детект арки → раскладка
 ```
 
@@ -174,10 +174,12 @@ JNI-поверхность Android-приложения не переносит�
 Тег `v*` → `release.yml`:
 
 1. статические бинарники — `wgkeybot-<goarch>` (OpenWrt) и
-   `wgkeybot-keenetic-<asset>` (Keenetic). Имена сохранены от прежних
-   раздельных репозиториев, чтобы разошедшиеся install.sh продолжали работать;
-2. `.ipk` через `openwrt/gh-action-sdk` для aarch64_cortex-a53 / mipsel_24kc /
-   x86_64 (только OpenWrt; на Keenetic ставится install.sh);
+   `wgkeybot-keenetic-<asset>` (Keenetic), каждый с `<ассет>.sha256`. Имена
+   сохранены от прежних раздельных репозиториев, чтобы разошедшиеся install.sh
+   продолжали работать;
+2. `.apk` через `openwrt/gh-action-sdk` для aarch64_cortex-a53 / mipsel_24kc /
+   x86_64 (только OpenWrt; на Keenetic ставится install.sh). SDK прибит к
+   25.12.5: без версии в `ARCH` action берёт SNAPSHOT ветки master;
 3. `install.sh` в ассеты.
 
 `PKG_VERSION` в `packaging/openwrt/wgkeybot/Makefile` синхронизируется с тегом в CI.

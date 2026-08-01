@@ -22,31 +22,98 @@ err() { echo "ERROR: $*" >&2; exit 1; }
 
 [ "$(id -u)" = "0" ] || err "запустите от root"
 
+# Опечатка в аргументе иначе молча превратилась бы в 404 при скачивании.
+case "$VERSION" in
+	latest | uninstall | v[0-9]*) ;;
+	*) err "непонятный аргумент '$VERSION'.
+     Ожидается тег вида v0.1.0, 'latest' (по умолчанию) или 'uninstall'." ;;
+esac
+
 # ── Определение платформы ────────────────────────────────────────────────────
 # OpenWrt узнаётся по /etc/openwrt_release. Keenetic — по каталогу Entware плюс
 # ответу локального RCI прошивки: одного /opt мало, Entware ставят и на другие
 # прошивки, а без RCI демону всё равно не с чем работать.
+#
+# Автоопределение промахивается на кастомных сборках и когда веб-интерфейс
+# Keenetic выключен, поэтому неудача не фатальна: платформу можно задать
+# переменной WGKEYBOT_PLATFORM или выбрать из меню. Причина возвращается строкой
+# с "!" в начале — присвоить её глобальной переменной нельзя, функция вызывается
+# в подоболочке $( ).
 detect_platform() {
 	[ -f /etc/openwrt_release ] && { echo openwrt; return; }
 	if [ -d /opt/etc/init.d ]; then
-		if wget -q -T 3 -O /dev/null http://localhost:79/rci/show/version 2>/dev/null; then
+		if wget -q -T 3 -O /dev/null http://127.0.0.1:79/rci/show/version 2>/dev/null; then
 			echo keenetic; return
 		fi
-		err "найден Entware, но локальный RCI (http://localhost:79) не отвечает —
-     это не KeeneticOS 4.x либо веб-интерфейс отключён"
+		echo "!найден Entware (/opt/etc/init.d), но локальный RCI (http://127.0.0.1:79) не отвечает — это не KeeneticOS либо веб-интерфейс прошивки отключён"
+		return
 	fi
+	echo "!нет ни /etc/openwrt_release (OpenWrt), ни /opt/etc/init.d (Entware на Keenetic)"
+}
+
+# choose_platform выставляет $PLATFORM по ответу пользователя. $1 — причина, по
+# которой не сработало автоопределение.
+choose_platform() {
+	echo "Не удалось определить платформу автоматически:"
+	echo "  $1"
+	echo ""
+
+	# Скрипт обычно запускают как `wget -O - … | sh`, и на stdin висит его же
+	# текст — спрашивать оттуда нельзя, читаем с терминала. Нет терминала
+	# (cron, CI, docker без -t) — остаётся только переменная. Проверяем именно
+	# открытием: без управляющего терминала /dev/tty существует и проходит
+	# `test -r`, но open даёт ENXIO. Открываем в подоболочке: неудачный редирект
+	# составной команды dash/ash считают фатальным и молча убивают весь скрипт,
+	# а падение подоболочки — это просто ненулевой код возврата.
+	if ! ( : < /dev/tty ) 2>/dev/null; then
+		err "терминал недоступен, выбрать платформу не у кого.
+     Укажите её явно: WGKEYBOT_PLATFORM=openwrt sh install.sh
+     Допустимые значения: openwrt, keenetic"
+	fi
+
+	while :; do
+		echo "Выберите платформу вручную:"
+		echo "  1) OpenWrt  — UCI и procd, бинарник в /usr/bin"
+		echo "  2) Keenetic — KeeneticOS с Entware, бинарник в /opt/sbin"
+		echo "  3) Отмена"
+		printf "Номер [1-3]: "
+		if ! read -r ans < /dev/tty; then
+			err "ввод оборван. Укажите платформу явно:
+     WGKEYBOT_PLATFORM=openwrt sh install.sh"
+		fi
+		case "$ans" in
+			1) PLATFORM=openwrt; break ;;
+			2) PLATFORM=keenetic; break ;;
+			3 | q | Q) err "установка отменена" ;;
+			*) echo "Нужно ввести 1, 2 или 3."; echo "" ;;
+		esac
+	done
+	echo "Выбрано вручную: $PLATFORM. Если выбор неверен — снесите установку"
+	echo "командой 'sh install.sh uninstall'."
 	echo ""
 }
 
-PLATFORM="$(detect_platform)"
-[ -n "$PLATFORM" ] || err "не удалось определить платформу: нет ни /etc/openwrt_release (OpenWrt),
-     ни /opt/etc/init.d (Entware на Keenetic)"
+if [ -n "${WGKEYBOT_PLATFORM:-}" ]; then
+	PLATFORM="$WGKEYBOT_PLATFORM"
+	case "$PLATFORM" in
+		openwrt | keenetic) echo "Платформа задана вручную: $PLATFORM" ;;
+		*) err "WGKEYBOT_PLATFORM=$PLATFORM — допустимо только openwrt или keenetic" ;;
+	esac
+else
+	PLATFORM="$(detect_platform)"
+	case "$PLATFORM" in
+		"!"*) choose_platform "${PLATFORM#!}" ;;
+	esac
+fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
 
 download() {
-	# $1 url, $2 dest
-	command -v uclient-fetch >/dev/null 2>&1 && uclient-fetch -O "$2" "$1" && return 0
-	command -v wget >/dev/null 2>&1 && wget -q -O "$2" "$1" && return 0
-	command -v curl >/dev/null 2>&1 && curl -fsL -o "$2" "$1" && return 0
+	# $1 url, $2 dest. Вызывается только слева от `||`, поэтому set -e внутри
+	# не срабатывает и неудача одной качалки честно передаёт ход следующей.
+	have uclient-fetch && uclient-fetch -O "$2" "$1" && return 0
+	have wget && wget -q -O "$2" "$1" && return 0
+	have curl && curl -fsL -o "$2" "$1" && return 0
 	return 1
 }
 
@@ -59,50 +126,169 @@ asset_url() {
 	fi
 }
 
+file_size() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
+
+# elf_arch печатает GOARCH по заголовку ELF или "" если это не ELF. Разбираем
+# файл, а не запускаем его: так одинаково ловятся HTML-заглушка провайдера,
+# тело 404, обрыв закачки и бинарник не той арки — причём до того, как что-то
+# установлено, и без оглядки на noexec у /tmp.
+elf_arch() {
+	[ "$(od -An -N4 -tx1 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ] || return 0
+	class=$(od -An -j4 -N1 -tu1 "$1" | tr -d ' ')  # 1 = 32 бита, 2 = 64
+	data=$(od -An -j5 -N1 -tu1 "$1" | tr -d ' ')   # 1 = little-endian, 2 = big
+	# e_machine — два байта по смещению 18, порядок как у data.
+	set -- $(od -An -j18 -N2 -tu1 "$1")
+	if [ "$data" = "1" ]; then mach=$(( $1 + $2 * 256 )); else mach=$(( $1 * 256 + $2 )); fi
+	case "$mach:$class:$data" in
+		62:2:1)  echo amd64 ;;   # EM_X86_64
+		183:2:1) echo arm64 ;;   # EM_AARCH64
+		40:1:1)  echo armv7 ;;   # EM_ARM
+		8:1:1)   echo mipsle ;;  # EM_MIPS, LE
+		8:1:2)   echo mips ;;    # EM_MIPS, BE
+		*)       echo "ELF (машина $mach, class $class, data $data)" ;;
+	esac
+}
+
+check_binary() {
+	# $1 файл, $2 ожидаемый GOARCH
+	got="$(elf_arch "$1")"
+	[ -n "$got" ] || err "скачан не бинарник, а $(file_size "$1") байт мусора.
+     Так выглядит страница 404 (неверная версия?) или заглушка провайдера.
+     Проверьте URL руками: $URL"
+	[ "$got" = "$2" ] || err "скачан бинарник для '$got', а роутеру нужен '$2'.
+     Похоже на ошибку в ассетах релиза — сообщите о ней."
+}
+
+# verify_sha256 сверяет файл с <asset>.sha256 из того же релиза. Отсутствие
+# суммы или sha256sum — предупреждение, а не отказ: старые релизы сумм не
+# публиковали, а на Entware без coreutils считать нечем.
+verify_sha256() {
+	# $1 файл, $2 url бинарника
+	have sha256sum || { echo "ВНИМАНИЕ: нет sha256sum, контрольная сумма не проверена" >&2; return 0; }
+	sumf="$1.sha256"
+	if ! download "$2.sha256" "$sumf" || [ ! -s "$sumf" ]; then
+		rm -f "$sumf"
+		echo "ВНИМАНИЕ: $2.sha256 недоступен, контрольная сумма не проверена" >&2
+		return 0
+	fi
+	want="$(awk '{print $1; exit}' "$sumf")"
+	got="$(sha256sum "$1" | awk '{print $1}')"
+	rm -f "$sumf"
+	[ "$want" = "$got" ] || err "контрольная сумма не совпала.
+     ожидалось: $want
+     получено:  $got
+     Файл побился при закачке или подменён — установка прервана."
+	echo "Контрольная сумма sha256 совпала."
+}
+
+# need_space отказывается ставить бинарник, если на разделе назначения не
+# хватает места: на роутерах с маленьким overlay это самый частый исход, и
+# обрубленный файл лучше поймать до записи.
+need_space() {
+	# $1 каталог назначения, $2 нужно байт
+	have df || return 0
+	free_kb="$(df -k "$1" 2>/dev/null | awk 'NR>1 {print $4; exit}')"
+	case "$free_kb" in "" | *[!0-9]*) return 0 ;; esac
+	need_kb=$(( $2 / 1024 + 512 ))
+	[ "$free_kb" -ge "$need_kb" ] || err "мало места в $1: свободно ${free_kb} КБ, нужно ~${need_kb} КБ.
+     Освободите флеш или разместите бинарник на USB-накопителе."
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # OpenWrt
 # ══════════════════════════════════════════════════════════════════════════════
+
+# daemon_running — работает ли сейчас демон; pidfile пишет procd
+# (procd_set_param pidfile). Ответ нужен только чтобы решить, перезапускать ли
+# сервис после обновления: сама подмена бинарника от него не зависит. Через
+# pgrep -f не проверяем — он ловит собственную командную строку установщика.
+daemon_running() {
+	pid=""
+	[ -f /var/run/wgkeybot.pid ] && pid="$(cat /var/run/wgkeybot.pid 2>/dev/null)"
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 install_openwrt() {
+	# Поддерживаются только арки, актуальные в 2026-м и вывозящие двойное
+	# шифрование (TURN/DTLS-прокси + wireguard-go на каждый пакет). Отсев делаем
+	# явно: раньше все `arm_*` считались armv7, и на ARMv5-таргетах (kirkwood,
+	# at91) роутер молча получал бинарник, падающий с illegal instruction.
+	# Строки начинаются с "!" — маркер «арка распознана, но не поддерживается».
+	UNSUP_ARM="!ARMv5/ARMv6 не поддерживается: сборок под него нет, и на двойное шифрование этих SoC всё равно не хватает. Нужен ARMv7+, aarch64 или x86_64."
+	UNSUP_MIPS="!big-endian MIPS (ath79 и подобные) не поддерживается: сборок под него нет, и одноядерных SoC этого класса на двойное шифрование не хватает. Из MIPS поддерживается little-endian (mipsel, MT7621 и новее)."
+
 	detect_goarch() {
 		arch=""
 		[ -f /etc/openwrt_release ] && . /etc/openwrt_release
 		arch="$DISTRIB_ARCH"
+		# Фолбэки на случай пустого DISTRIB_ARCH: apk (25.12+), opkg (24.10 и
+		# старше), дальше — uname.
+		[ -n "$arch" ] || arch="$(apk --print-arch 2>/dev/null)"
 		[ -n "$arch" ] || arch="$(opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -v -e '^all$' -e '^noarch$' | tail -1)"
 
 		case "$arch" in
 			x86_64*)        echo "amd64" ;;
 			aarch64*)       echo "arm64" ;;
-			arm_*|armv7*)   echo "armv7" ;;
+			# ARMv5/ARMv6-таргеты OpenWrt: kirkwood, at91, mxs, oxnas.
+			arm_xscale* | arm_arm926* | arm_fa526* | arm_mpcore*)
+			                echo "$UNSUP_ARM" ;;
+			arm_* | armv7*) echo "armv7" ;;
 			mipsel_*)       echo "mipsle" ;;
-			mips_*)         echo "mips" ;;
+			mips_* | mips64_*) echo "$UNSUP_MIPS" ;;
 			*)
 				# Запасной путь через uname + endianness.
 				case "$(uname -m)" in
 					x86_64) echo "amd64" ;;
 					aarch64) echo "arm64" ;;
 					armv7l|armv7) echo "armv7" ;;
+					armv5*|armv6*) echo "$UNSUP_ARM" ;;
 					mips|mips64)
+						# Байт 5 ELF-заголовка: 2 — big-endian. Неизвестный
+						# ответ трактуем как mipsel (ходовой случай).
 						b=$(od -An -j5 -N1 -tu1 /bin/busybox 2>/dev/null | tr -d ' ')
-						[ "$b" = "2" ] && echo "mips" || echo "mipsle" ;;
+						[ "$b" = "2" ] && echo "$UNSUP_MIPS" || echo "mipsle" ;;
 					*) echo "" ;;
 				esac ;;
 		esac
 	}
 
 	GOARCH="$(detect_goarch)"
-	[ -n "$GOARCH" ] || err "не удалось определить архитектуру (DISTRIB_ARCH=$DISTRIB_ARCH, uname=$(uname -m))"
+	case "$GOARCH" in
+		"") err "не удалось определить архитектуру (DISTRIB_ARCH=$DISTRIB_ARCH, uname=$(uname -m))" ;;
+		"!"*) err "${GOARCH#!}" ;;
+	esac
 	echo "Платформа: OpenWrt, архитектура: $GOARCH"
 
 	URL="$(asset_url "wgkeybot-$GOARCH")"
 	echo "Загрузка $URL ..."
-	TMP="/tmp/wgkeybot.$$"
-	trap 'rm -f "$TMP"' EXIT
-	download "$URL" "$TMP" || err "не удалось скачать бинарник (нужен ca-bundle для https?)"
-	[ -s "$TMP" ] || err "скачан пустой файл"
+	# mktemp, а не /tmp/wgkeybot.$$: имя от PID предсказуемо, а скрипт работает
+	# от root — подсунутый симлинк писал бы куда угодно.
+	TMP="$(mktemp /tmp/wgkeybot.XXXXXX)" || err "не удалось создать временный файл в /tmp"
+	trap 'rm -f "$TMP" "$TMP.sha256"' EXIT INT TERM
+	download "$URL" "$TMP" || err "не удалось скачать $URL
+     Проверьте сеть и что такая версия существует; для https нужен ca-bundle."
+	[ -s "$TMP" ] || err "скачан пустой файл ($URL)"
+	check_binary "$TMP" "$GOARCH"
+	verify_sha256 "$TMP" "$URL"
+	need_space /usr/bin "$(file_size "$TMP")"
 
-	install -m 0755 "$TMP" /usr/bin/wgkeybot
-	rm -f "$TMP"; trap - EXIT
-	echo "Установлен /usr/bin/wgkeybot ($(/usr/bin/wgkeybot version 2>/dev/null || echo '?'))"
+	WAS_RUNNING=0
+	daemon_running && WAS_RUNNING=1
+
+	# Ставим рядом и переименовываем. `install` поверх работающего бинарника
+	# отрабатывает (busybox снимает ETXTBSY через unlink+create), но в этот
+	# момент файла на диске нет вовсе: обрыв питания оставит роутер без
+	# /usr/bin/wgkeybot. rename атомарен и запущенному демону не мешает — тот
+	# доживает на старом inode, поэтому сервис ниже перезапускаем сами.
+	trap 'rm -f "$TMP" "$TMP.sha256" /usr/bin/wgkeybot.new' EXIT INT TERM
+	install -m 0755 "$TMP" /usr/bin/wgkeybot.new
+	mv -f /usr/bin/wgkeybot.new /usr/bin/wgkeybot
+	rm -f "$TMP"; trap - EXIT INT TERM
+	VER_OUT="$(/usr/bin/wgkeybot version 2>&1)" || err "бинарник установлен, но не запускается:
+     $VER_OUT
+     Заголовок ELF и контрольная сумма сошлись, так что дело не в закачке —
+     повторите установку и приложите этот вывод к отчёту об ошибке."
+	echo "Установлен /usr/bin/wgkeybot ($VER_OUT)"
 
 	cat > /etc/init.d/wgkeybot <<'INITEOF'
 #!/bin/sh /etc/rc.common
@@ -184,6 +370,27 @@ UCIEOF
 
 	/etc/init.d/wgkeybot enable 2>/dev/null || true
 
+	# Демону нужен TUN. Модуль может быть просто не загружен — пробуем, и лишь
+	# потом жалуемся: ставить пакеты за пользователя установщик не берётся.
+	[ -c /dev/net/tun ] || modprobe tun >/dev/null 2>&1 || true
+	if [ ! -c /dev/net/tun ]; then
+		echo ""
+		echo "ВНИМАНИЕ: нет /dev/net/tun — без модуля tun демон не поднимет туннель."
+		if have apk; then
+			echo "  Поставьте: apk add kmod-tun"
+		else
+			echo "  Поставьте: opkg update && opkg install kmod-tun"
+		fi
+	fi
+
+	# Демон работал до обновления — он всё ещё крутит старый inode, поднимаем
+	# заново уже с новым бинарником.
+	if [ "$WAS_RUNNING" = "1" ]; then
+		/etc/init.d/wgkeybot restart >/dev/null 2>&1 || true
+		echo ""
+		echo "Сервис перезапущен с новым бинарником."
+	fi
+
 	cat <<DONE
 
 Готово. Дальше:
@@ -216,38 +423,60 @@ KEEN_CONF_DIR=/opt/etc/wgkeybot
 KEEN_CONF=$KEEN_CONF_DIR/wgkeybot.conf
 
 install_keenetic() {
+	# Как и на OpenWrt: "!" в начале — арка распознана, но не поддерживается.
+	# err здесь звать нельзя, функция работает в подоболочке $( ) и выход из неё
+	# скрипт не остановит.
 	detect_goarch() {
 		arch=""
-		command -v opkg >/dev/null 2>&1 && \
+		have opkg && \
 			arch="$(opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -v -e '^all$' -e '^noarch$' | tail -1)"
 		[ -n "$arch" ] || arch="$(uname -m)"
 
 		case "$arch" in
 			aarch64*) echo "aarch64" ;;
 			mipselsf* | mipsel*) echo "mipselsf" ;;
-			mipssf* | mips*) err "big-endian MIPS не поддерживается (нет моделей Keenetic 4.x на нём)" ;;
-			x86_64*) err "x86_64 не поддерживается: Keenetic на x86 не существует.
-     Если это OpenWrt на x86 — установщик должен был определить платформу как
-     OpenWrt; проверьте наличие /etc/openwrt_release" ;;
-			*) err "неизвестная архитектура: $arch" ;;
+			mipssf* | mips*) echo "!big-endian MIPS не поддерживается: моделей Keenetic на нём нет" ;;
+			x86_64*) echo "!x86_64 не поддерживается: Keenetic на x86 не существует. Если это OpenWrt на x86 — проверьте наличие /etc/openwrt_release либо укажите платформу через WGKEYBOT_PLATFORM=openwrt" ;;
+			*) echo "!неизвестная архитектура: $arch" ;;
 		esac
 	}
 
-	GOARCH_NAME=$(detect_goarch)
+	GOARCH_NAME="$(detect_goarch)"
+	case "$GOARCH_NAME" in
+		"") err "не удалось определить архитектуру (uname=$(uname -m))" ;;
+		"!"*) err "${GOARCH_NAME#!}" ;;
+	esac
 	echo "Платформа: Keenetic (Entware), архитектура: $GOARCH_NAME"
+
+	# Ожидаемая машина ELF для проверки скачанного.
+	case "$GOARCH_NAME" in
+		aarch64) WANT_ELF=arm64 ;;
+		*) WANT_ELF=mipsle ;;
+	esac
 
 	URL="$(asset_url "wgkeybot-keenetic-$GOARCH_NAME")"
 	echo "Скачиваю $URL ..."
-	TMP=$(mktemp /opt/tmp/wgkeybot.XXXXXX 2>/dev/null || mktemp)
-	trap 'rm -f "$TMP"' EXIT
-	download "$URL" "$TMP" || err "не удалось скачать бинарник ($URL)"
-	[ -s "$TMP" ] || err "скачан пустой файл"
+	mkdir -p /opt/sbin /opt/tmp
+	TMP="$(mktemp /opt/tmp/wgkeybot.XXXXXX 2>/dev/null || mktemp)" || err "не удалось создать временный файл"
+	trap 'rm -f "$TMP" "$TMP.sha256"' EXIT INT TERM
+	download "$URL" "$TMP" || err "не удалось скачать $URL
+     Проверьте сеть и что такая версия существует; для https нужен ca-bundle
+     (opkg install ca-bundle ca-certificates)."
+	[ -s "$TMP" ] || err "скачан пустой файл ($URL)"
+	check_binary "$TMP" "$WANT_ELF"
+	verify_sha256 "$TMP" "$URL"
+	need_space /opt/sbin "$(file_size "$TMP")"
 
 	[ -x "$KEEN_INIT" ] && "$KEEN_INIT" stop 2>/dev/null || true
-	mkdir -p /opt/sbin
-	mv "$TMP" "$KEEN_BIN"
-	trap - EXIT
-	chmod 755 "$KEEN_BIN"
+	# Права выставляем до подмены, чтобы файл ни секунды не лежал по месту с
+	# чужими правами. mktemp выше берёт /opt/tmp — тот же раздел, что /opt/sbin,
+	# так что mv здесь атомарный rename.
+	chmod 755 "$TMP"
+	mv -f "$TMP" "$KEEN_BIN"
+	trap - EXIT INT TERM
+	VER_OUT="$("$KEEN_BIN" version 2>&1)" || err "бинарник установлен, но не запускается:
+     $VER_OUT"
+	echo "Установлен $KEEN_BIN ($VER_OUT)"
 
 	cat > "$KEEN_INIT" <<'EOF'
 #!/bin/sh
@@ -336,7 +565,7 @@ EOF
 
 	"$KEEN_INIT" start || true
 
-	LAN_IP=$(wget -q -O - http://localhost:79/rci/show/interface/Bridge0 2>/dev/null |
+	LAN_IP=$(wget -q -O - http://127.0.0.1:79/rci/show/interface/Bridge0 2>/dev/null |
 		sed -n 's/.*"address": *"\([0-9.]*\)".*/\1/p' | head -1)
 	[ -n "$LAN_IP" ] || LAN_IP="<LAN-IP роутера>"
 
@@ -358,7 +587,7 @@ uninstall_keenetic() {
 	WG_IFACE=$(sed -n 's/.*"wg_iface"[^"]*"\([^"]*\)".*/\1/p' "$KEEN_CONF_DIR/state.json" 2>/dev/null)
 	if [ -n "$WG_IFACE" ]; then
 		wget -q -O /dev/null --post-data="[{\"parse\":\"interface $WG_IFACE down\"}]" \
-			http://localhost:79/rci/ 2>/dev/null || true
+			http://127.0.0.1:79/rci/ 2>/dev/null || true
 		echo "Интерфейс $WG_IFACE выключен (подключение осталось в NDM — удалите в веб-интерфейсе при желании)."
 	fi
 

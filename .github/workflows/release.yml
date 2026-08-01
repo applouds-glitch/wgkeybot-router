@@ -21,7 +21,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # OpenWrt (сборка по умолчанию)
+          # OpenWrt (сборка по умолчанию). Арки — только те, где порт имеет
+          # смысл в 2026-м: каждый пакет шифруется дважды (DTLS-прокси +
+          # wireguard-go), так что одноядерные ath79 (mips big-endian) и ARMv5
+          # (kirkwood, at91) не тянут — ассетов под них нет, install.sh на них
+          # отказывается ставиться.
           - asset: wgkeybot-amd64
             goarch: amd64
           - asset: wgkeybot-arm64
@@ -32,10 +36,7 @@ jobs:
           - asset: wgkeybot-mipsle
             goarch: mipsle
             gomips: softfloat
-          - asset: wgkeybot-mips
-            goarch: mips
-            gomips: softfloat
-          # Keenetic (-tags keenetic). Арки строго по моделям 4.x: MT7621
+          # Keenetic (-tags keenetic). Арки строго по моделям 4.x/5.x: MT7621
           # (mipsle) и MT7622/EN7581 (arm64). x86_64 здесь не собираем —
           # Keenetic на x86 не существует, такой ассет никому не нужен.
           - asset: wgkeybot-keenetic-mipselsf
@@ -72,11 +73,19 @@ jobs:
             -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.v }}" \
             -o "${{ matrix.asset }}" .
 
+      # Сумма рядом с ассетом, а не общий SHA256SUMS: install.sh качает ровно
+      # один файл и сверяет его, не разбирая список и не завися от других ног
+      # матрицы. Формат — вывод sha256sum, его же читает установщик.
+      - name: Checksum
+        run: sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -85,11 +94,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
 
-  # ── .ipk через OpenWrt SDK для ходовых таргетов ─────────────────────────────
-  # Только OpenWrt: на Keenetic ipk не собираем, там ставится install.sh.
-  ipk:
+  # ── Пакет через OpenWrt SDK для ходовых таргетов ────────────────────────────
+  # Только OpenWrt: на Keenetic пакетов нет, там ставится install.sh.
+  package:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -113,10 +124,17 @@ jobs:
       # Staging-копия создала бы второй Makefile того же PKG_NAME в одном feed.
       # V=s — иначе при ошибке SDK печатает только «failed to build» без единой
       # строки от компилятора, и падение приходится угадывать.
-      - name: Build ipk
+      #
+      # Версия SDK в ARCH прибита намеренно: без суффикса gh-action-sdk
+      # подставляет арку прямо в тег контейнера (`FROM ghcr.io/openwrt/sdk:$ARCH`),
+      # а это SNAPSHOT ветки master — пакет собирался бы под движущуюся цель, а
+      # не под ту ветку, что стоит у пользователей. 25.12 — первая стабильная с
+      # apk, поэтому на выходе .apk, а не .ipk; пользователи 24.10 ставят
+      # установщиком, статическому бинарнику версия ОС безразлична.
+      - name: Build package
         uses: openwrt/gh-action-sdk@main
         env:
-          ARCH: ${{ matrix.arch }}
+          ARCH: ${{ matrix.arch }}-25.12.5
           FEEDNAME: wgkeybot
           PACKAGES: wgkeybot
           V: s
@@ -129,11 +147,12 @@ jobs:
           path: logs/
           if-no-files-found: ignore
 
-      - name: Collect ipk
+      - name: Collect package
         run: |
           mkdir -p out
-          find bin -name 'wgkeybot*.ipk' -o -name 'wgkeybot*.apk' | xargs -I{} cp {} out/ || true
+          find bin \( -name 'wgkeybot*.apk' -o -name 'wgkeybot*.ipk' \) -exec cp {} out/ \;
           ls -la out
+          [ -n "$(ls -A out)" ] || { echo "SDK не отдал пакет"; exit 1; }
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
@@ -147,7 +166,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: wgkeybot-ipk-${{ matrix.arch }}
+          name: wgkeybot-apk-${{ matrix.arch }}
           path: out/*
 
   # ── install.sh в ассеты релиза ──────────────────────────────────────────────

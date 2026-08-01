@@ -48,7 +48,10 @@ const (
 	DefaultProxyPort  = 51821
 	DefaultListenAddr = "127.0.0.1"
 	DefaultKeepalive  = 25
-	DefaultRCIURL     = "http://localhost:79/rci"
+	// Именно 127.0.0.1, не localhost: в KeeneticOS 5.1.2 запросы к RCI с
+	// Host: localhost отдают 403 (исправлено только в 5.2). IP-форма
+	// принимается всеми версиями.
+	DefaultRCIURL = "http://127.0.0.1:79/rci"
 )
 
 // Settings — настройки демона.
